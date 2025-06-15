@@ -28,8 +28,14 @@ python main.py "https://www.figma.com/plugin-docs/" -o ./figma-docs
 # 最大深度を指定（デフォルト: 3）
 python main.py "https://www.figma.com/plugin-docs/" -d 5
 
+# CSSセレクタを指定してDOM要素のみを抽出
+python main.py "https://www.figma.com/plugin-docs/" -s ".main-content"
+
+# 複数のセレクタを指定（記事のヘッダーと段落のみ抽出）
+python main.py "https://example.com" -s "h1, h2, p"
+
 # すべてのオプションを指定
-python main.py "https://www.figma.com/plugin-docs/" -o ./output -d 2
+python main.py "https://www.figma.com/plugin-docs/" -o ./output -d 2 -s "article"
 
 ```
 
@@ -37,10 +43,11 @@ python main.py "https://www.figma.com/plugin-docs/" -o ./output -d 2
 
 ### オプション
 
-| オプション    | 短縮形 | デフォルト | 説明             |
-| ------------- | ------ | ---------- | ---------------- |
-| `--output`    | `-o`   | `./docs`   | 出力ディレクトリ |
-| `--max-depth` | `-d`   | `3`        | 最大クロール深度 |
+| オプション    | 短縮形 | デフォルト | 説明                                                                     |
+| ------------- | ------ | ---------- | ------------------------------------------------------------------------ |
+| `--output`    | `-o`   | `./docs`   | 出力ディレクトリ                                                         |
+| `--max-depth` | `-d`   | `3`        | 最大クロール深度                                                         |
+| `--selector`  | `-s`   | なし       | CSSセレクタで特定のDOM要素のみを抽出（例: "h1, p", ".content", "#main"） |
 
 ### ヘルプ
 
@@ -55,6 +62,10 @@ python main.py --help
 - URLパターンフィルタリング（現在はFigma Plugin Docs用）
 - マークダウン形式での出力
 - 非同期処理による高速クロール
+- **CSSセレクタによる特定DOM要素の抽出**
+    - 標準的なCSSセレクタに対応（class, id, タグ名など）
+    - 複数セレクタをカンマ区切りで指定可能
+    - 例: `h1, h2, .content, #main-article`
 
 ## 制限事項
 

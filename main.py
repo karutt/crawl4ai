@@ -1,89 +1,318 @@
-import asyncio
+#!/usr/bin/env python3
+"""
+Web Crawler with Crawl4AI
+
+Webサイトをクロールしてマークダウン形式で保存するPythonスクリプトです。
+"""
+
 import argparse
+import asyncio
 import os
-from urllib.parse import urlparse
-
-# ノートブック実行時の asyncio 再入場許可
+import re
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
+from typing import Set, List
 import nest_asyncio
-from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
-from crawl4ai.content_scraping_strategy import LXMLWebScrapingStrategy
-from crawl4ai.deep_crawling import BFSDeepCrawlStrategy
-from crawl4ai.deep_crawling.filters import FilterChain, URLPatternFilter
 
-nest_asyncio.apply()
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 
 
-async def crawl_and_save(
-    root_url: str, output_dir: str = "./docs", max_depth: int = 3, css_selector: str = None
-):
-    # 保存先ディレクトリを作成
-    os.makedirs(output_dir, exist_ok=True)
-
-    # 1. URLに基づいて動的にフィルタパターンを生成
-    parsed_url = urlparse(root_url)
-    domain = parsed_url.netloc
-    url_pattern = f"*{domain}*"
-    url_filter = URLPatternFilter(patterns=[url_pattern])
-    filter_chain = FilterChain([url_filter])
-
-    # 2. 深いクロール戦略の設定
-    strategy = BFSDeepCrawlStrategy(
-        max_depth=max_depth,  # 引数で指定された階層まで
-        include_external=False,  # 同一ドメイン外は除外
-        max_pages=12000,  # 最大 100 ページ
-        filter_chain=filter_chain,  # パス制限を適用
-    )
-
-    # 3. クロール設定
-    config_params = {
-        "deep_crawl_strategy": strategy,
-        "scraping_strategy": LXMLWebScrapingStrategy(),
-        "wait_for_images": False,
-        "scan_full_page": True,
-        "page_timeout": 120000,
-        "js_code": [
-            # 例: ボタンをクリックして1秒待機してから抽出開始
-            "(async () => { document.querySelector('button.load-more')?.click(); await new Promise(r=>setTimeout(r,1000)); })();"
-        ],
-        "verbose": True,
-    }
-
-    if css_selector:
-        config_params["css_selector"] = css_selector
-
-    run_config = CrawlerRunConfig(**config_params)
-
-    # 4. 非同期クロール実行
-    async with AsyncWebCrawler() as crawler:
-        results = await crawler.arun(url=root_url, config=run_config)
-
-        for res in results:
-            if not res.success:
+class WebCrawler:
+    def __init__(self, start_url: str, output_dir: str = "./docs", max_depth: int = 3, css_selector: str = None):
+        """
+        Webクローラーを初期化
+        
+        Args:
+            start_url: 開始URL
+            output_dir: 出力ディレクトリ
+            max_depth: 最大クロール深度
+            css_selector: 指定したCSSセレクタのDOM要素のみを抽出
+        """
+        self.start_url = start_url
+        self.output_dir = Path(output_dir)
+        self.max_depth = max_depth
+        self.css_selector = css_selector
+        self.visited_urls: Set[str] = set()
+        self.domain = urlparse(start_url).netloc
+        
+        # 出力ディレクトリを作成
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # URLパターンフィルタ（設定されていない場合は全てのドメインを許可）
+        self.allowed_patterns = [
+            r".*figma\.com/plugin-docs/.*",
+            r".*example\.com.*",  # テスト用
+            r".*learn\.microsoft\.com.*",  # Microsoft Learn用
+            r".*"  # 全てのURLを許可（汎用的な使用のため）
+        ]
+    
+    def is_valid_url(self, url: str) -> bool:
+        """
+        URLが有効かどうかをチェック
+        
+        Args:
+            url: チェックするURL
+            
+        Returns:
+            bool: URLが有効かどうか
+        """
+        parsed = urlparse(url)
+        
+        # 同一ドメインかチェック
+        if parsed.netloc != self.domain:
+            return False
+        
+        # ベースURL配下かチェック
+        if not parsed.path.startswith(urlparse(self.start_url).path):
+            return False
+        
+        # URLパターンフィルタリング
+        for pattern in self.allowed_patterns:
+            if re.match(pattern, url):
+                return True
+        
+        return False
+    
+    def url_to_filename(self, url: str) -> str:
+        """
+        URLをファイル名に変換
+        
+        Args:
+            url: 変換するURL
+            
+        Returns:
+            str: ファイル名
+        """
+        parsed = urlparse(url)
+        path = parsed.path.strip('/')
+        
+        if not path:
+            return "index.md"
+        
+        # パスをファイル名に変換
+        filename = path.replace('/', '-')
+        filename = re.sub(r'[^\w\-_.]', '-', filename)
+        filename = re.sub(r'-+', '-', filename)
+        filename = filename.strip('-')
+        
+        if not filename.endswith('.md'):
+            filename += '.md'
+        
+        return filename
+    
+    def extract_links(self, content: str, base_url: str) -> List[str]:
+        """
+        コンテンツからリンクを抽出
+        
+        Args:
+            content: HTMLコンテンツ
+            base_url: ベースURL
+            
+        Returns:
+            List[str]: 抽出されたリンクのリスト
+        """
+        links = []
+        unique_links = set()  # 重複を防ぐためのセット
+        
+        # HTMLからリンクを抽出
+        html_link_pattern = r'href=["\']([^"\']+)["\']'
+        matches = re.findall(html_link_pattern, content)
+        
+        for match in matches:
+            # JavaScriptリンクやメールリンクをスキップ
+            if match.startswith(('javascript:', 'mailto:', '#')):
                 continue
-            # URL からファイル名を生成
-            path = urlparse(res.url).path.strip("/").replace("/", "-") or "index"
-            filename = os.path.join(output_dir, f"{path}.md")
-            # Markdown を書き出し
-            with open(filename, "w", encoding="utf-8") as f:
-                f.write(res.markdown.raw_markdown)
-            print(f"Saved: {filename}")
+                
+            full_url = urljoin(base_url, match)
+            
+            # フラグメント（#以降）を除去して重複チェック
+            clean_url = full_url.split('#')[0]
+            
+            if (self.is_valid_url(clean_url) and 
+                clean_url not in self.visited_urls and 
+                clean_url not in unique_links):
+                links.append(clean_url)
+                unique_links.add(clean_url)
+        
+        return links
+    
+    async def crawl_page(self, url: str) -> tuple[str, List[str]]:
+        """
+        単一ページをクロール
+        
+        Args:
+            url: クロールするURL
+            
+        Returns:
+            tuple: (マークダウンコンテンツ, 抽出されたリンク)
+        """
+        browser_config = BrowserConfig(
+            headless=True,
+            verbose=False
+        )
+        
+        crawler_config = CrawlerRunConfig(
+            cache_mode=CacheMode.BYPASS,
+            word_count_threshold=10,
+            extraction_strategy=None,
+            chunking_strategy=None,
+            css_selector=self.css_selector,
+            screenshot=False,
+            user_agent="Mozilla/5.0 (compatible; WebCrawler/1.0)"
+        )
+        
+        try:
+            async with AsyncWebCrawler(config=browser_config) as crawler:
+                result = await crawler.arun(
+                    url=url,
+                    config=crawler_config
+                )
+                
+                if result.success:
+                    markdown_content = result.markdown or ""
+                    links = self.extract_links(result.html or "", url)
+                    return markdown_content, links
+                else:
+                    print(f"Failed to crawl {url}: {result.error_message}")
+                    return "", []
+                    
+        except Exception as e:
+            print(f"Error crawling {url}: {str(e)}")
+            return "", []
+    
+    async def save_content(self, url: str, content: str):
+        """
+        コンテンツをファイルに保存
+        
+        Args:
+            url: 元のURL
+            content: マークダウンコンテンツ
+        """
+        filename = self.url_to_filename(url)
+        filepath = self.output_dir / filename
+        
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(f"# {url}\n\n")
+                f.write(content)
+            print(f"Saved: {filepath}")
+        except Exception as e:
+            print(f"Error saving {url} to {filepath}: {str(e)}")
+    
+    async def crawl_recursive(self, url: str, depth: int = 0):
+        """
+        再帰的にWebサイトをクロール
+        
+        Args:
+            url: クロールするURL
+            depth: 現在の深度
+        """
+        if depth > self.max_depth or url in self.visited_urls:
+            return
+        
+        if not self.is_valid_url(url):
+            return
+        
+        print(f"Crawling (depth {depth}): {url}")
+        self.visited_urls.add(url)
+        
+        # ページをクロール
+        content, links = await self.crawl_page(url)
+        
+        if content:
+            await self.save_content(url, content)
+        
+        # デバッグ情報
+        print(f"Found {len(links)} links at depth {depth}")
+        for i, link in enumerate(links[:5]):  # 最初の5つのリンクを表示
+            print(f"  Link {i+1}: {link}")
+        if len(links) > 5:
+            print(f"  ... and {len(links) - 5} more links")
+        
+        # 見つかったリンクを再帰的にクロール
+        if depth < self.max_depth:
+            tasks = []
+            for link in links:
+                if link not in self.visited_urls:
+                    tasks.append(self.crawl_recursive(link, depth + 1))
+            
+            if tasks:
+                # 同時実行数を制限（最大10並行）
+                batch_size = 10
+                for i in range(0, len(tasks), batch_size):
+                    batch = tasks[i:i + batch_size]
+                    await asyncio.gather(*batch, return_exceptions=True)
+    
+    async def start_crawling(self):
+        """
+        クロールを開始
+        """
+        print(f"Starting crawl from: {self.start_url}")
+        print(f"Output directory: {self.output_dir}")
+        print(f"Max depth: {self.max_depth}")
+        if self.css_selector:
+            print(f"CSS Selector: {self.css_selector}")
+        print("-" * 50)
+        
+        await self.crawl_recursive(self.start_url)
+        
+        print("-" * 50)
+        print(f"Crawling completed. Total pages crawled: {len(self.visited_urls)}")
+        print(f"Files saved to: {self.output_dir}")
 
 
-# スクリプト実行用エントリポイント
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Crawl and save web pages as Markdown")
-    parser.add_argument("url", help="Root URL to crawl")
-    parser.add_argument(
-        "-o", "--output", default="./docs", help="Output directory (default: ./docs)"
+def main():
+    """
+    メイン関数
+    """
+    parser = argparse.ArgumentParser(
+        description="Webサイトをクロールしてマークダウン形式で保存するPythonスクリプト"
     )
+    
     parser.add_argument(
-        "-d", "--max-depth", type=int, default=3, help="Maximum crawl depth (default: 3)"
+        "url",
+        help="クロールを開始するURL"
     )
+    
     parser.add_argument(
-        "-s",
-        "--selector",
-        help="CSS selector to extract specific content (e.g., '.markdown-preview-sizer')",
+        "-o", "--output",
+        default="./docs",
+        help="出力ディレクトリ (デフォルト: ./docs)"
     )
-
+    
+    parser.add_argument(
+        "-d", "--max-depth",
+        type=int,
+        default=3,
+        help="最大クロール深度 (デフォルト: 3)"
+    )
+    
+    parser.add_argument(
+        "-s", "--selector",
+        default=None,
+        help="指定したCSSセレクタのDOM要素のみを抽出"
+    )
+    
     args = parser.parse_args()
-    asyncio.run(crawl_and_save(args.url, args.output, args.max_depth, args.selector))
+    
+    # nest-asyncioを適用（Jupyter環境など既存のイベントループがある場合に必要）
+    nest_asyncio.apply()
+    
+    # クローラーを作成して実行
+    crawler = WebCrawler(
+        start_url=args.url,
+        output_dir=args.output,
+        max_depth=args.max_depth,
+        css_selector=args.selector
+    )
+    
+    try:
+        asyncio.run(crawler.start_crawling())
+    except KeyboardInterrupt:
+        print("\nCrawling interrupted by user.")
+    except Exception as e:
+        print(f"Error during crawling: {str(e)}")
+
+
+if __name__ == "__main__":
+    main()
