@@ -18,7 +18,7 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 
 
 class WebCrawler:
-    def __init__(self, start_url: str, output_dir: str = "./docs", max_depth: int = 3, css_selector: str = None):
+    def __init__(self, start_url: str, output_dir: str = "./docs", max_depth: int = 3, css_selector: str = None, allow_query: bool = False):
         """
         Webクローラーを初期化
         
@@ -27,11 +27,13 @@ class WebCrawler:
             output_dir: 出力ディレクトリ
             max_depth: 最大クロール深度
             css_selector: 指定したCSSセレクタのDOM要素のみを抽出
+            allow_query: クエリパラメータ付きURLへのアクセスを許可するかどうか
         """
         self.start_url = start_url
         self.output_dir = Path(output_dir)
         self.max_depth = max_depth
         self.css_selector = css_selector
+        self.allow_query = allow_query
         self.visited_urls: Set[str] = set()
         self.domain = urlparse(start_url).netloc
         
@@ -62,6 +64,13 @@ class WebCrawler:
         if parsed.netloc != self.domain:
             return False
         
+        # クエリパラメータのチェック
+        if not self.allow_query and parsed.query:
+            # 開始URLと同じクエリパラメータの場合のみ許可
+            start_parsed = urlparse(self.start_url)
+            if parsed.query != start_parsed.query:
+                return False
+        
         # ベースURL配下かチェック
         if not parsed.path.startswith(urlparse(self.start_url).path):
             return False
@@ -87,13 +96,21 @@ class WebCrawler:
         path = parsed.path.strip('/')
         
         if not path:
-            return "index.md"
+            filename = "index"
+        else:
+            # パスをファイル名に変換
+            filename = path.replace('/', '-')
+            filename = re.sub(r'[^\w\-_.]', '-', filename)
+            filename = re.sub(r'-+', '-', filename)
+            filename = filename.strip('-')
         
-        # パスをファイル名に変換
-        filename = path.replace('/', '-')
-        filename = re.sub(r'[^\w\-_.]', '-', filename)
-        filename = re.sub(r'-+', '-', filename)
-        filename = filename.strip('-')
+        # クエリパラメータがある場合はファイル名に追加
+        if parsed.query:
+            # クエリパラメータを安全なファイル名形式に変換
+            query_safe = re.sub(r'[^\w\-_=&]', '-', parsed.query)
+            query_safe = re.sub(r'-+', '-', query_safe)
+            query_safe = query_safe.strip('-')
+            filename += f"--{query_safe}"
         
         if not filename.endswith('.md'):
             filename += '.md'
@@ -252,6 +269,7 @@ class WebCrawler:
         print(f"Max depth: {self.max_depth}")
         if self.css_selector:
             print(f"CSS Selector: {self.css_selector}")
+        print(f"Allow query parameters: {self.allow_query}")
         print("-" * 50)
         
         await self.crawl_recursive(self.start_url)
@@ -293,6 +311,12 @@ def main():
         help="指定したCSSセレクタのDOM要素のみを抽出"
     )
     
+    parser.add_argument(
+        "--allow-query",
+        action="store_true",
+        help="クエリパラメータ付きURLへのアクセスを許可する"
+    )
+    
     args = parser.parse_args()
     
     # nest-asyncioを適用（Jupyter環境など既存のイベントループがある場合に必要）
@@ -303,7 +327,8 @@ def main():
         start_url=args.url,
         output_dir=args.output,
         max_depth=args.max_depth,
-        css_selector=args.selector
+        css_selector=args.selector,
+        allow_query=args.allow_query
     )
     
     try:
